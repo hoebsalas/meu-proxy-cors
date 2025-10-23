@@ -1,94 +1,67 @@
-// Ficheiro: api/proxy.js
-// VERSÃO FINALÍSSIMA VALIDADA - Assinatura do Token com Headers
+// /api/proxy.js
+// ETAPA 2: Usar o Access Token para comandos (O Proxy)
 
-const CryptoJS = require('crypto-js');
+import crypto from 'crypto';
 
-module.exports = async (request, response) => {
-    // Headers de CORS e Preflight
-    response.setHeader('Access-Control-Allow-Origin', 'https://hoebsalas.github.io');
-    response.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
-    response.setHeader('Access-Control-Allow-Headers', 'Content-Type');
-    response.setHeader('Cache-Control', 'no-cache');
-    
-    if (request.method === 'OPTIONS') {
-       return response.status(200).end();
+export default async function handler(req, res) {
+
+    // 1. Ler dados do seu frontend
+    const accessToken = req.headers.authorization?.split(' ')[1]; 
+    const tuyaPath = req.headers['x-tuya-path'];
+    const tuyaMethod = req.headers['x-tuya-method'] || 'GET';
+    const body = req.body;
+
+    // 2. Ler segredos do servidor Vercel
+    const clientId = process.env.TUYA_CLIENT_ID;
+    const secretKey = process.env.TUYA_SECRET_KEY;
+
+    // 3. Validação
+    if (!accessToken || !tuyaPath || !clientId || !secretKey) {
+        return res.status(400).json({ 
+            code: 400, 
+            msg: 'Faltando cabeçalhos (Authorization, X-Tuya-Path) ou configuração do servidor.' 
+        });
     }
 
-    console.log("--- INICIANDO REQUISIÇÃO (Assinatura Token c/ Headers) ---");
+    // 4. Recalcular a Assinatura (para comandos)
+    const t = Date.now().toString();
+    const bodyString = Object.keys(body).length === 0 ? '' : JSON.stringify(body);
+    const bodyHash = crypto.createHash('sha256').update(bodyString).digest('hex');
 
+    const headersToSign = "";
+    const stringToSign =
+        clientId + accessToken + t + tuyaMethod + '\n' +
+        bodyHash + '\n' +
+        headersToSign + '\n' +
+        tuyaPath;
+
+    const sign = crypto.createHmac('sha256', secretKey)
+                       .update(stringToSign)
+                       .digest('hex')
+                       .toUpperCase();
+
+    // 5. Montar a chamada real para a Tuya
+    const url = `https://openapi.tuyaus.com${tuyaPath}`;
+
+    const tuyaHeaders = {
+        'client_id': clientId,
+        'access_token': accessToken,
+        'sign': sign,
+        't': t,
+        'sign_method': 'HMAC-SHA256',
+        'Content-Type': 'application/json'
+    };
+
+    // 6. Fazer a chamada e retornar
     try {
-        const { id } = request.query;
-        if (!id) { return response.status(400).json({ success: false, msg: "Device ID é obrigatório." }); }
-
-        const clientId = "8y9cawst5km45canysuq";
-        const secret = "2cabe1ab28674f1f9b10376baf22e94f";
-        const baseUrl = "https://openapi.tuyaus.com";
-        const t = Date.now().toString();
-        
-        // ===== PASSO 1: OBTER O ACCESS TOKEN (Assinatura COM Headers) =====
-        const tokenMethod = "GET";
-        const tokenPath = "/v1.0/token?grant_type=1";
-        const tokenBody = ""; 
-        const tokenContentHash = CryptoJS.SHA256(tokenBody).toString(CryptoJS.enc.Hex);
-        
-        // *** A CORREÇÃO CRUCIAL ESTÁ AQUI ***
-        // Incluindo os cabeçalhos 'client_id' e 't' na assinatura, como
-        // sugerido por exemplos de implementação para esta chamada específica.
-        const tokenHeadersToSign = `client_id:${clientId}\nt:${t}`; 
-        const tokenStringToSign = `${tokenMethod}\n${tokenContentHash}\n${tokenHeadersToSign}\n${tokenPath}`;
-        // **********************************
-
-        const tokenSign = CryptoJS.HmacSHA256(tokenStringToSign, secret).toString(CryptoJS.enc.Hex).toUpperCase();
-        
-        const tokenHeaders = {
-            'client_id': clientId, 
-            'sign': tokenSign, 
-            't': t, 
-            'sign_method': 'HMAC-SHA256',
-            // Informa à Tuya quais cabeçalhos foram incluídos na assinatura
-            'Signature-Headers': 'client_id:t' 
-        };
-
-        console.log("Token - URL:", baseUrl + tokenPath);
-        console.log("Token - String Assinada:", tokenStringToSign.replace(/\n/g, '\\n'));
-        console.log("Token - Headers:", JSON.stringify(tokenHeaders));
-
-        const tokenResponse = await fetch(baseUrl + tokenPath, { method: tokenMethod, headers: tokenHeaders });
-        const tokenData = await tokenResponse.json();
-        console.log("Token - Resposta:", JSON.stringify(tokenData));
-
-        if (!tokenData.success) {
-            console.error("Falha ao obter Access Token:", tokenData); 
-            return response.status(401).json(tokenData);
-        }
-        
-        const accessToken = tokenData.result.access_token;
-
-        // ===== PASSO 2: OBTER OS DADOS DO SENSOR (Já estava correto) =====
-        const statusMethod = "GET";
-        const statusPath = `/v2.0/cloud/thing/${id}/shadow/properties`;
-        const statusBody = "";
-        const statusContentHash = CryptoJS.SHA256(statusBody).toString(CryptoJS.enc.Hex);
-        
-        const statusStringToSign = clientId + accessToken + t + statusMethod + '\n' + statusContentHash + '\n\n' + statusPath; // Assinatura complexa aqui está correta
-        const statusSign = CryptoJS.HmacSHA256(statusStringToSign, secret).toString(CryptoJS.enc.Hex).toUpperCase();
-
-        const statusHeaders = {
-            'client_id': clientId, 'sign': statusSign, 't': t, 'access_token': accessToken, 'sign_method': 'HMAC-SHA256'
-        };
-
-        console.log("\nStatus - URL:", baseUrl + statusPath);
-        // console.log("Status - String Assinada:", statusStringToSign.replace(/\n/g, '\\n')); 
-        // console.log("Status - Headers:", JSON.stringify(statusHeaders));
-
-        const statusResponse = await fetch(baseUrl + statusPath, { method: statusMethod, headers: statusHeaders });
-        const statusData = await statusResponse.json();
-        console.log("Status - Resposta:", JSON.stringify(statusData));
-        
-        response.status(200).json(statusData);
-
+        const response = await fetch(url, {
+            method: tuyaMethod,
+            headers: tuyaHeaders,
+            body: bodyString === '' ? null : bodyString
+        });
+        const data = await response.json();
+        res.status(response.status).json(data);
     } catch (error) {
-        console.error("Erro Crítico no Servidor:", error);
-        response.status(500).json({ success: false, msg: error.message });
+        res.status(500).json({ code: 500, msg: 'Erro interno do proxy', error: error.message });
     }
-};
+}
